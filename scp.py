@@ -1,3 +1,5 @@
+import getopt
+import sys
 import os
 import paramiko
 
@@ -107,7 +109,72 @@ def send_files(file):
 	chan.sendall('\x00')
 	file_hdl.close()
 	recv_confirm()
-def main():
+
+
+def main(argv):
+	pathFrom = None
+	pathTo = None
+	recursive = False
+
+	usernameFrom = None
+	hostFrom = None
+	dirFrom = None
+
+	usernameTo = None
+	hostTo = None
+	dirTo = None
+
+#parsing the arguments
+	if len(argv) < 4:
+		print "invalid usage\ntry:\nUsage scp.py [-r recursive] [-f from] <username@host:path/to/file1> [-t to] <to username@host:/path/to/file2>"
+		return
+	try:
+		opts, args = getopt.getopt(argv,"rf:t:",[])
+	except getopt.GetoptError:
+		print "Correct Use:\nscp.py [-r recursive] [-f from] <username@host:path/to/file1> [-t to] <to username@host:/path/to/file2>"
+		return
+	for opt, arg in opts:
+		if opt == '-f':
+			pathFrom = arg
+		elif opt == '-t':
+			pathTo = arg
+		elif opt == '-r':
+			recursive = True
+		else:
+			print "invalid option %s",opt
+			return
+#splittimg the from aand to paths because they are of the form username@host:/path/to/file
+#We want username, host, path to file seperately
+	pathFromSplit = pathFrom.split('@')
+	if len(pathFromSplit) == 2:
+		usernameFrom = pathFromSplit[0]
+		pathFromSplit = pathFromSplit[1].split(':')
+		if len(pathFromSplit) == 2:
+			hostFrom = pathFromSplit[0]
+			dirFrom = pathFromSplit[1]
+		else:
+			print "Invalid from address"
+	elif len(pathFromSplit) < 2 :
+		dirFrom = pathFrom
+	else:
+		print "invalid Path from"
+		return	
+	pathToSplit = pathTo.split('@')
+	if len(pathToSplit) == 2:
+		usernameTo = pathToSplit[0]
+		pathToSplit = pathToSplit[1].split(':')
+		if len(pathToSplit) == 2:
+			hostTo = pathToSplit[0]
+			dirTo = pathToSplit[1]
+		else:
+			print "Invalid To address"
+	elif len(pathToSplit) < 2: 
+		dirTo = pathTo
+	else:
+		print "invalid Path To"
+		return			 		
+
+
 	ssh = paramiko.SSHClient()
 	ssh.set_missing_host_key_policy(
 	    paramiko.AutoAddPolicy())
@@ -119,12 +186,20 @@ def main():
 	transport = ssh.get_transport()
 	channel = transport.open_session()
 	channel.settimeout(5.0)
+
+
 	# channel.exec_command("pwd")
 	# msg = channel.recv(512)
-	channel.exec_command("scp -t ~/")
-	msg = channel.recv(512)
-	print msg
-	send_files('sent.txt')
+
+
+	# channel.exec_command("scp -t ~/")
+	# msg = channel.recv(512)
+	# print msg
+	# send_files('sent.txt')
+
+
+if __name__ == "__main__":
+	main(sys.argv[1:])
 
 #print "sfadfsa"
 # stdin, stdout, stderr = ssh.exec_command("uptime")
