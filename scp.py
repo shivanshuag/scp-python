@@ -2,77 +2,37 @@ import getopt
 import sys
 import os
 import paramiko
+import getpass
 
 
-hostname = 'csews48.cse.iitk.ac.in'
-port = 22
-username = 'mohitkg'
-password = 'kanp25161cseiit'
+buff_size = 16384
+global recursive
+recursive = False
 
-
-# hostkeytype = None
-# hostkey = None
-# files_copied = 0
-
-# try:
-#     host_keys = paramiko.util.load_host_keys(os.path.expanduser('~/.ssh/known_hosts'))
-#     print "loaded known hosts from ~/.ssh/known_hosts"
-# except IOError:
-#     try:
-#         # try ~/ssh/ too, e.g. on windows
-#         host_keys = paramiko.util.load_host_keys(os.path.expanduser('~/ssh/known_hosts'))
-#         print "loaded known hosts form ~/ssh/known_hosts"
-#     except IOError:
-#         print '*** Unable to open host keys file'
-#         host_keys = {}
-
-# if host_keys.has_key(hostname):
-#     hostkeytype = host_keys[hostname].keys()[0]
-#     hostkey = host_keys[hostname][hostkeytype]
-#     print 'Using host key of type %s' % hostkeytype
-# try:
-#     print 'Establishing SSH connection to:', hostname, port, '...'
-#     t = paramiko.Transport((hostname, port))
-#     t.connect(username=username, password=password, hostkey=hostkey)
-#     channel = t.open_session()
-#     print channel
-#     #stdin, stdout, stderr = channel.exec_command("uptime")
-#     #print stdout.readlines()
-#     #t.start_client()
-# except Exception, e:
-#     print '*** Caught exception: %s: %s' % (e.__class__, e)
-#     try:
-#         t.close()
-#     except:
-#         pass
-def recv_confirm():
+def ack(channel):
     # read scp response
-    msg = ''
+    recv = ''
     try:
-        msg = channel.recv(512)
+        recv = channel.recv(512)
     except SocketTimeout:
-    	print "timeout"
-    	pass
-        #raise SCPException('Timout waiting for scp response')
-    if msg and msg[0] == '\x00':
+    	print "timeout while waiting for ack"
+    	sys.exit(0)
+    if recv and recv[0] == '\x00':
         return
-    elif msg and msg[0] == '\x01':
-    	print "exception"
-    	pass
-        #raise SCPException(msg[1:])
+    elif recv and recv[0] == '\x01':
+    	print "exception\n"
+    	print recv[1:]
+    	sys.exit(0)
     elif channel.recv_stderr_ready():
-        msg = channel.recv_stderr(512)
-        print "exception"
-    	pass
-        #raise SCPException(msg)
-    elif not msg:
-    	print "exception"
-    	pass
-        #raise SCPException('No response from server')
+        recv = channel.recv_stderr(512)
+        print "exception\n"
+        print recv
+    elif not recv:
+    	print "No reponse from the server while waiting for ack\n"
+    	sys.exit(0)
     else:
-    	print "exception"
-    	pass
-        #raise SCPException('Invalid response from server: ' + msg)
+    	print "Invalid response form the server while waiting for ack\n"
+    	sys.exit(0)
 
 
 def read_stats(name):
@@ -111,10 +71,110 @@ def send_files(file):
 	recv_confirm()
 
 
+def upload_nextDir(channel,directory):
+    (mode, size, mtime, atime) = read_stats(directory)
+    filename = os.path.basename(directory)
+    # if preserve_times:
+    #     _send_time(mtime, atime)
+    channel.sendall('D%s 0 %s\n' %(mode, filename.replace('\n', '\\^J')))
+    ack(channel)
+
+def upload_prevDir(channel):
+    channel.sendall('E\n')
+    ack(channel)
+
+
+def changeDir(channel, from_dir, to_dir):
+    # Pop until we're one level up from our next push.
+    # Push *once* into to_dir.
+    # This is dependent on the depth-first traversal from os.walk
+
+    # add path.sep to each when checking the prefix, so we can use
+    # path.dirname after
+    common = os.path.commonprefix([from_dir + os.path.sep,
+                                   to_dir + os.path.sep])
+    # now take the dirname, since commonprefix is character based,
+    # and we either have a seperator, or a partial name
+    common = os.path.dirname(common)
+    cur_dir = from_dir.rstrip(os.path.sep)
+    while cur_dir != common:
+        cur_dir = os.path.split(cur_dir)[0]
+        upload_prevDir(channel)
+    # now we're in our common base directory, so on
+    upload_nextDir(channel, to_dir)
+
+
+def createSSHChannel(username, host):
+	ssh = paramiko.SSHClient()
+	ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+	pbulicKeyFile = os.path.expanduser("~")+'/.ssh/id_rsa.pub'
+	try:
+		ssh.connect(host, username=username, key_filename=pbulicKeyFile,  look_for_keys=True)
+	except paramiko.AuthenticationException:
+		print 'public key authentication failed, enter password for '+username+'@'+host
+		password = getpass.getpass('Password:')
+		try:
+			ssh.connect(host, username=username, password=password)
+		except paramiko.AuthenticationException:
+			print"Authentication failed"
+			sys.exit(0)
+	global transport
+
+	return ssh
+
+
+def upload_single_file(channel, dirFrom):
+	filename = os.path.basename(dirFrom)
+	fil = open(dirFrom,'rb')
+	(mode, size, mtime, atime) = read_stats(dirFrom)
+	channel.sendall("C%s %d %s\n" % (mode, size, filename.replace('\n', '\\^J')))
+	ack(channel)
+	file_pos = 0
+	while file_pos < size:
+	    channel.sendall(fil.read(buff_size))
+	    file_pos = fil.tell()
+	channel.sendall('\x00')
+	fil.close()
+	ack(channel)
+
+def upload(usernameTo, hostTo, dirTo, dirFrom):
+	global recursive
+	print "uploading file to host"
+	#transport = createSSHChannel(usernameTo, hostTo)
+	ssh = createSSHChannel(usernameTo, hostTo)
+	transport = ssh.get_transport()
+	channel = transport.open_session()
+	channel.settimeout(5.0)
+
+	# if recursive:
+	# 	for root, dirs, fls in os.walk(base)
+
+	dirTo = "'" + dirTo.replace("'", "'\"'\"'") + "'"
+
+	if recursive:
+		if not os.path.isdir(dirFrom):
+			print dirFrom+"is not a directory"
+		else:
+			scp_command = "scp -r -t "+dirTo
+			channel.exec_command(scp_command)
+			ack(channel)
+			last_dir = dirFrom
+			for root, dirs, files in os.walk(dirFrom):
+				changeDir(channel, last_dir, root)
+				for f in files:
+ 					upload_single_file(channel, os.path.join(root, f))
+				last_dir = root
+	else:
+		scp_command = "scp -t "+dirTo
+		channel.exec_command(scp_command)
+		ack(channel)
+		upload_single_file(channel, dirFrom)
+
+
 def main(argv):
+	global recursive
 	pathFrom = None
 	pathTo = None
-	recursive = False
 
 	usernameFrom = None
 	hostFrom = None
@@ -140,52 +200,58 @@ def main(argv):
 			pathTo = arg
 		elif opt == '-r':
 			recursive = True
+			print "detected -r option"
 		else:
 			print "invalid option %s",opt
 			return
+
 #splittimg the from aand to paths because they are of the form username@host:/path/to/file
 #We want username, host, path to file seperately
-	pathFromSplit = pathFrom.split('@')
-	if len(pathFromSplit) == 2:
+	pathFromSplit = pathFrom.split('@',1)
+	if len(pathFromSplit) == 2 :
 		usernameFrom = pathFromSplit[0]
-		pathFromSplit = pathFromSplit[1].split(':')
-		if len(pathFromSplit) == 2:
+		pathFromSplit = pathFromSplit[1].split(':',1)
+		if len(pathFromSplit) == 2 :
 			hostFrom = pathFromSplit[0]
 			dirFrom = pathFromSplit[1]
 		else:
-			print "Invalid from address"
-	elif len(pathFromSplit) < 2 :
-		dirFrom = pathFrom
+			hostFrom = pathFromSplit[0]
 	else:
-		print "invalid Path from"
-		return	
-	pathToSplit = pathTo.split('@')
-	if len(pathToSplit) == 2:
+		dirFrom = pathFromSplit[0]	
+
+	pathToSplit = pathTo.split('@',1)
+	if len(pathToSplit) == 2 :
 		usernameTo = pathToSplit[0]
-		pathToSplit = pathToSplit[1].split(':')
-		if len(pathToSplit) == 2:
+		pathToSplit = pathToSplit[1].split(':',1)
+		if len(pathToSplit) == 2 :
 			hostTo = pathToSplit[0]
 			dirTo = pathToSplit[1]
 		else:
-			print "Invalid To address"
-	elif len(pathToSplit) < 2: 
-		dirTo = pathTo
+			hostTo = pathToSplit[0]
 	else:
-		print "invalid Path To"
-		return			 		
+		dirTo = pathToSplit[0]	
 
+	if hostFrom == None and hostTo!=None :
+		upload(usernameTo, hostTo, dirTo, dirFrom)
+	elif hostFrom!=None and hostTo == None :
+		download(usernameFrom, hostFrom, dirFrom, dirTo)
+	else :
+		remoteToremote(usernameTo, hostTo, dirTo, usernameFrom, hostFrom, dirFrom)
 
-	ssh = paramiko.SSHClient()
-	ssh.set_missing_host_key_policy(
-	    paramiko.AutoAddPolicy())
-	try:
-		ssh.connect(hostname, username=username, 
-	    password=password)
-	except e:
-		print e
-	transport = ssh.get_transport()
-	channel = transport.open_session()
-	channel.settimeout(5.0)
+	# try:
+	# 	ssh.connect("webhome.cc.iitk.ac.in", username='agrawals',key_filename=pbulicKeyFile,  look_for_keys=True)
+	# except paramiko.AuthenticationException:
+	# 	print 'public key authentication failed, enter password'
+	# 	pswd = getpass.getpass('Password:')
+	# 	try:
+	# 		ssh.connect("webhome.cc.iitk.ac.in", username='agrawals', password=pswd)
+	# 	except paramiko.AuthenticationException:
+	# 		print"Authentication failed"
+	# 		return
+
+	# transport = ssh.get_transport()
+	# channel = transport.open_session()
+	# channel.settimeout(5.0)
 
 
 	# channel.exec_command("pwd")
@@ -194,7 +260,7 @@ def main(argv):
 
 	# channel.exec_command("scp -t ~/")
 	# msg = channel.recv(512)
-	# print msg
+	# print msa
 	# send_files('sent.txt')
 
 
